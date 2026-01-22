@@ -369,6 +369,8 @@ type model struct {
 	height      int
 	groups      []TypeGroup
 	groupIndex  int
+	groupQuery  string
+	groupSearch bool
 	db          *sql.DB
 	err         error
 }
@@ -400,12 +402,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case tea.KeyMsg:
+		if m.mode == modeGroup && m.groupSearch {
+			if msg.String() == "ctrl+c" || msg.String() == "q" {
+				return m, tea.Quit
+			}
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.groupSearch = false
+			case tea.KeyEnter:
+				m.groupSearch = false
+			case tea.KeyBackspace, tea.KeyCtrlH:
+				m.groupQuery = dropLastRune(m.groupQuery)
+			case tea.KeyRunes:
+				m.groupQuery += string(msg.Runes)
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "/":
+			if m.mode == modeGroup {
+				m.groupSearch = true
+				m.groupQuery = ""
+			}
 		case "j", "J":
-			if m.mode == modeGroup && m.groupIndex < len(m.groups)-1 {
-				m.groupIndex++
+			if m.mode == modeGroup {
+				filtered := filterGroups(m.groups, m.groupQuery)
+				if m.groupIndex < len(filtered)-1 {
+					m.groupIndex++
+				}
 			}
 		case "k", "K":
 			if m.mode == modeGroup && m.groupIndex > 0 {
@@ -413,8 +439,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "enter":
 			if m.mode == modeGroup {
-				if m.groupIndex >= 0 && m.groupIndex < len(m.groups) {
-					selected := m.groups[m.groupIndex].Type
+				filtered := filterGroups(m.groups, m.groupQuery)
+				if m.groupIndex >= 0 && m.groupIndex < len(filtered) {
+					selected := filtered[m.groupIndex].Type
 					questions, err := loadQuestions(m.db, selected)
 					if err != nil {
 						m.err = err
@@ -435,6 +462,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	if m.mode == modeGroup {
+		filtered := filterGroups(m.groups, m.groupQuery)
+		if m.groupIndex >= len(filtered) {
+			m.groupIndex = len(filtered) - 1
+		}
+		if m.groupIndex < 0 {
+			m.groupIndex = 0
+		}
+	}
 	return m, nil
 }
 
@@ -443,7 +479,7 @@ func (m model) View() string {
 		return fmt.Sprintf("Error: %v\nq to quit\n", m.err)
 	}
 	if m.mode == modeGroup {
-		return renderGroupList(m.groups, m.groupIndex, m.width, m.height) + "\n"
+		return renderGroupList(m.groups, m.groupIndex, m.width, m.height, m.groupQuery, m.groupSearch) + "\n"
 	}
 	if m.index >= len(m.questions) {
 		return orange + "No more questions in this session." + reset + "\nq to quit\n"
@@ -465,13 +501,14 @@ func renderCard(q Question, showAnswers bool, pos, total, width int) string {
 	inner := width - 2
 
 	line := func(text string) string {
-		return "| " + padRight(text, inner-2) + " |"
+		return orange + "|" + reset + " " + padRight(text, inner-2) + " " + orange + "|" + reset
 	}
 
 	builder := strings.Builder{}
 	builder.WriteString(orange)
 	builder.WriteString("+" + strings.Repeat("-", inner) + "+\n")
 	builder.WriteString(line(fmt.Sprintf("fcards%*s", inner-8, fmt.Sprintf("%d/%d", pos, total))) + "\n")
+	builder.WriteString(orange)
 	builder.WriteString("+" + strings.Repeat("-", inner) + "+\n")
 	builder.WriteString(reset)
 
@@ -505,7 +542,7 @@ func renderCard(q Question, showAnswers bool, pos, total, width int) string {
 	return builder.String()
 }
 
-func renderGroupList(groups []TypeGroup, selected, width, height int) string {
+func renderGroupList(groups []TypeGroup, selected, width, height int, query string, searching bool) string {
 	_ = width
 	builder := strings.Builder{}
 	builder.WriteString(orange)
@@ -513,7 +550,12 @@ func renderGroupList(groups []TypeGroup, selected, width, height int) string {
 	builder.WriteString(reset)
 	builder.WriteString("\n\n")
 
-	if len(groups) == 0 {
+	filtered := filterGroups(groups, query)
+	if searching || strings.TrimSpace(query) != "" {
+		builder.WriteString("Search: " + query + "\n\n")
+	}
+
+	if len(filtered) == 0 {
 		builder.WriteString("No types found.\n")
 		builder.WriteString("q to quit\n")
 		return builder.String()
@@ -528,12 +570,12 @@ func renderGroupList(groups []TypeGroup, selected, width, height int) string {
 		start = selected - maxLines + 1
 	}
 	end := start + maxLines
-	if end > len(groups) {
-		end = len(groups)
+	if end > len(filtered) {
+		end = len(filtered)
 	}
 
 	for i := start; i < end; i++ {
-		g := groups[i]
+		g := filtered[i]
 		name := strings.TrimSpace(g.Type)
 		if name == "" {
 			name = "(none)"
@@ -549,8 +591,35 @@ func renderGroupList(groups []TypeGroup, selected, width, height int) string {
 		builder.WriteString("\n")
 	}
 	builder.WriteString("\n")
-	builder.WriteString("J/K: move  •  Enter: open  •  q: quit")
+	if searching {
+		builder.WriteString("Type to search  •  Enter/Esc: done  •  q: quit")
+	} else {
+		builder.WriteString("J/K: move  •  Enter: open  •  /: search  •  q: quit")
+	}
 	return builder.String()
+}
+
+func filterGroups(groups []TypeGroup, query string) []TypeGroup {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return groups
+	}
+	needle := strings.ToLower(trimmed)
+	filtered := make([]TypeGroup, 0, len(groups))
+	for _, g := range groups {
+		if strings.Contains(strings.ToLower(g.Type), needle) {
+			filtered = append(filtered, g)
+		}
+	}
+	return filtered
+}
+
+func dropLastRune(text string) string {
+	if text == "" {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:len(runes)-1])
 }
 
 func wrapLines(text string, width int) []string {
