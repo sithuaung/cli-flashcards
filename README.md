@@ -21,7 +21,7 @@ The app stores data in `flashcards.db` in the project directory.
 ```
 
 Questions are randomly loaded. Can go to next/prev questions by pressing "h" or "l" just like vim.
-To see the answer, press "enter".
+To see the answer, press "enter". To quite, press "q"
 
 
 Flags:
