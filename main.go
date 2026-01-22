@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,14 +44,14 @@ func main() {
 	flag.StringVar(&groupBy, "group", "", "group questions (supported: type)")
 	flag.Parse()
 
-	db, err := openDB("flashcards.db")
+	db, err := openDB("flashcards.db") // sqlite
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to open db:", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	if err := ensureSchema(db); err != nil {
+	if err := runMigrations(db); err != nil {
 		fmt.Fprintln(os.Stderr, "failed to init schema:", err)
 		os.Exit(1)
 	}
@@ -110,25 +112,82 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-func ensureSchema(db *sql.DB) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS questions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			text TEXT NOT NULL,
-			type TEXT NOT NULL DEFAULT ''
-		);`,
-		`CREATE TABLE IF NOT EXISTS answers (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			question_id INTEGER NOT NULL,
-			text TEXT NOT NULL,
-			FOREIGN KEY(question_id) REFERENCES questions(id)
-		);`,
+func runMigrations(db *sql.DB) error {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+		version TEXT PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	);`); err != nil {
+		return err
 	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
+
+	entries, err := os.ReadDir("migrations")
+	if err != nil {
+		return err
+	}
+
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".sql") {
+			files = append(files, name)
+		}
+	}
+	sort.Strings(files)
+
+	applied := make(map[string]bool)
+	rows, err := db.Query(`SELECT version FROM schema_migrations;`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return err
+		}
+		applied[version] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, name := range files {
+		if applied[name] {
+			continue
+		}
+		path := filepath.Join("migrations", name)
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(body)) == "" {
+			continue
+		}
+
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(string(body)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?);`,
+			name,
+			time.Now().UTC().Format(time.RFC3339),
+		); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
 			return err
 		}
 	}
+
 	return ensureQuestionTypeColumn(db)
 }
 
