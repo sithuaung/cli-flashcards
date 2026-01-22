@@ -20,6 +20,10 @@ The app stores data in `flashcards.db` in the project directory.
 ./fcards -group type
 ```
 
+Questions are randomly loaded. Can go to next/prev questions by pressing "h" or "l" just like vim.
+To see the answer, press "enter".
+
+
 Flags:
 - `-type`: filter questions by type
 - `-group`: group questions (currently supports `type`)
