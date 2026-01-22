@@ -35,3 +35,5 @@ To add a migration:
 ## Seeding
 If the database is empty, a small sample set of questions is inserted
 automatically.
+
+## Import Q&A by yourself
