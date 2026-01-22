@@ -20,14 +20,26 @@ type Question struct {
 	Type    string
 }
 
+type TypeGroup struct {
+	Type  string
+	Count int
+}
+
 const (
 	orange = "\033[38;5;208m"
 	reset  = "\033[0m"
 )
 
+const (
+	modeCards = iota
+	modeGroup
+)
+
 func main() {
 	var typeFilter string
+	var groupBy string
 	flag.StringVar(&typeFilter, "type", "", "filter questions by type")
+	flag.StringVar(&groupBy, "group", "", "group questions (supported: type)")
 	flag.Parse()
 
 	db, err := openDB("flashcards.db")
@@ -47,6 +59,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	if strings.TrimSpace(groupBy) != "" {
+		switch strings.ToLower(strings.TrimSpace(groupBy)) {
+		case "type":
+			groups, err := loadTypeGroups(db)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "failed to list questions by type:", err)
+				os.Exit(1)
+			}
+			if err := runUI(newGroupModel(groups, db)); err != nil {
+				fmt.Fprintln(os.Stderr, "ui error:", err)
+				os.Exit(1)
+			}
+			return
+		default:
+			fmt.Fprintln(os.Stderr, "unsupported group:", groupBy)
+			os.Exit(1)
+		}
+	}
+
 	questions, err := loadQuestions(db, typeFilter)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to load questions:", err)
@@ -62,7 +93,7 @@ func main() {
 		questions[i], questions[j] = questions[j], questions[i]
 	})
 
-	if err := runUI(questions); err != nil {
+	if err := runUI(newCardsModel(questions)); err != nil {
 		fmt.Fprintln(os.Stderr, "ui error:", err)
 		os.Exit(1)
 	}
@@ -237,24 +268,66 @@ func loadQuestions(db *sql.DB, typeFilter string) ([]Question, error) {
 	return questions, nil
 }
 
-func runUI(questions []Question) error {
-	p := tea.NewProgram(newModel(questions), tea.WithAltScreen())
+func loadTypeGroups(db *sql.DB) ([]TypeGroup, error) {
+	rows, err := db.Query(`
+		SELECT q.type, COUNT(1)
+		FROM questions q
+		GROUP BY q.type
+		ORDER BY q.type;
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var groups []TypeGroup
+	for rows.Next() {
+		var qType string
+		var count int
+		if err := rows.Scan(&qType, &count); err != nil {
+			return nil, err
+		}
+		groups = append(groups, TypeGroup{Type: qType, Count: count})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func runUI(m tea.Model) error {
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
 
 type model struct {
+	mode        int
 	questions   []Question
 	index       int
 	showAnswers bool
 	width       int
 	height      int
+	groups      []TypeGroup
+	groupIndex  int
+	db          *sql.DB
+	err         error
 }
 
-func newModel(questions []Question) model {
+func newCardsModel(questions []Question) model {
 	return model{
+		mode:      modeCards,
 		questions: questions,
 		width:     64,
+	}
+}
+
+func newGroupModel(groups []TypeGroup, db *sql.DB) model {
+	return model{
+		mode:   modeGroup,
+		groups: groups,
+		width:  64,
+		db:     db,
 	}
 }
 
@@ -271,12 +344,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "j", "J":
+			if m.mode == modeGroup && m.groupIndex < len(m.groups)-1 {
+				m.groupIndex++
+			}
+		case "k", "K":
+			if m.mode == modeGroup && m.groupIndex > 0 {
+				m.groupIndex--
+			}
 		case "enter":
-			if m.index < len(m.questions) {
+			if m.mode == modeGroup {
+				if m.groupIndex >= 0 && m.groupIndex < len(m.groups) {
+					selected := m.groups[m.groupIndex].Type
+					questions, err := loadQuestions(m.db, selected)
+					if err != nil {
+						m.err = err
+						return m, nil
+					}
+					m.mode = modeCards
+					m.questions = questions
+					m.index = 0
+					m.showAnswers = false
+				}
+			} else if m.index < len(m.questions) {
 				m.showAnswers = true
 			}
 		case "h", "l":
-			if m.index < len(m.questions) {
+			if m.mode == modeCards && m.index < len(m.questions) {
 				m.index++
 				m.showAnswers = false
 			}
@@ -286,13 +380,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.err != nil {
+		return fmt.Sprintf("Error: %v\nq to quit\n", m.err)
+	}
+	if m.mode == modeGroup {
+		return renderGroupList(m.groups, m.groupIndex, m.width, m.height) + "\n"
+	}
 	if m.index >= len(m.questions) {
 		return orange + "No more questions in this session." + reset + "\nq to quit\n"
 	}
 
 	width := 64
 	if m.width > 0 {
-		width = min(m.width-4, 72)
+		width = m.width / 2
 	}
 	if width < 34 {
 		width = 34
@@ -328,7 +428,7 @@ func renderCard(q Question, showAnswers bool, pos, total, width int) string {
 			builder.WriteString(line("(no answers stored)") + "\n")
 		} else {
 			for _, ans := range q.Answers {
-				for _, lineText := range wrapLines("- "+ans, inner-2) {
+				for _, lineText := range formatAnswerLines(ans, inner-2) {
 					builder.WriteString(line(lineText) + "\n")
 				}
 			}
@@ -343,6 +443,54 @@ func renderCard(q Question, showAnswers bool, pos, total, width int) string {
 	builder.WriteString("+" + strings.Repeat("-", inner) + "+")
 	builder.WriteString(reset)
 
+	return builder.String()
+}
+
+func renderGroupList(groups []TypeGroup, selected, width, height int) string {
+	_ = width
+	builder := strings.Builder{}
+	builder.WriteString(orange)
+	builder.WriteString("fcards — group by type")
+	builder.WriteString(reset)
+	builder.WriteString("\n\n")
+
+	if len(groups) == 0 {
+		builder.WriteString("No types found.\n")
+		builder.WriteString("q to quit\n")
+		return builder.String()
+	}
+
+	maxLines := height - 4
+	if maxLines < 6 {
+		maxLines = 6
+	}
+	start := 0
+	if selected >= maxLines {
+		start = selected - maxLines + 1
+	}
+	end := start + maxLines
+	if end > len(groups) {
+		end = len(groups)
+	}
+
+	for i := start; i < end; i++ {
+		g := groups[i]
+		name := strings.TrimSpace(g.Type)
+		if name == "" {
+			name = "(none)"
+		}
+		line := fmt.Sprintf("%s - %d", name, g.Count)
+		if i == selected {
+			builder.WriteString(orange)
+			builder.WriteString("> " + line)
+			builder.WriteString(reset)
+		} else {
+			builder.WriteString("  " + line)
+		}
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n")
+	builder.WriteString("J/K: move  •  Enter: open  •  q: quit")
 	return builder.String()
 }
 
@@ -377,6 +525,85 @@ func wrapLines(text string, width int) []string {
 		lines = append(lines, "")
 	}
 	return lines
+}
+
+func formatAnswerLines(answer string, width int) []string {
+	const firstPrefix = "- "
+	const nextPrefix = "  "
+	const fence = "```"
+
+	lines := strings.Split(answer, "\n")
+	out := []string{}
+	inCode := false
+	used := false
+
+	for _, raw := range lines {
+		line := strings.TrimRight(raw, "\r")
+		if strings.HasPrefix(strings.TrimSpace(line), fence) {
+			inCode = !inCode
+			continue
+		}
+
+		if inCode {
+			line = expandTabs(line, 4)
+			prefix := nextPrefix
+			if !used {
+				prefix = firstPrefix
+				used = true
+			}
+			out = append(out, prefix+line)
+			continue
+		}
+
+		if strings.TrimSpace(line) == "" {
+			if used {
+				out = append(out, "")
+			}
+			continue
+		}
+
+		prefix := nextPrefix
+		if !used {
+			prefix = firstPrefix
+		}
+		space := width - len(prefix)
+		if space < 1 {
+			space = 1
+		}
+		wrapped := wrapLines(line, space)
+		for i, w := range wrapped {
+			p := nextPrefix
+			if !used && i == 0 {
+				p = firstPrefix
+				used = true
+			}
+			out = append(out, p+w)
+		}
+	}
+
+	return out
+}
+
+func expandTabs(s string, tabWidth int) string {
+	if tabWidth <= 0 || !strings.Contains(s, "\t") {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		if r == '\t' {
+			spaceCount := tabWidth - (col % tabWidth)
+			if spaceCount == 0 {
+				spaceCount = tabWidth
+			}
+			b.WriteString(strings.Repeat(" ", spaceCount))
+			col += spaceCount
+			continue
+		}
+		b.WriteRune(r)
+		col++
+	}
+	return b.String()
 }
 
 func padRight(text string, width int) string {
