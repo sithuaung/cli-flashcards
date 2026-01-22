@@ -672,10 +672,3 @@ func padRight(text string, width int) string {
 	}
 	return text + strings.Repeat(" ", width-len(runes))
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
