@@ -1,6 +1,7 @@
 # Flashcards CLI (Go)
 
 Simple terminal flashcards with a SQLite backend.
+<img width="1173" height="417" alt="Screenshot 2569-01-22 at 9 21 50 PM" src="https://github.com/user-attachments/assets/885624bd-6b37-48e4-a8eb-961a65278c3a" />
 
 ## Requirements
 - Go 1.20+
