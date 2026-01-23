@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"embed"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -14,6 +15,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	_ "modernc.org/sqlite"
 )
+
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 type Question struct {
 	ID      int
@@ -32,6 +36,18 @@ const (
 	reset  = "\033[0m"
 )
 
+func getDataDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".fcards")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 const (
 	modeCards = iota
 	modeGroup
@@ -44,7 +60,13 @@ func main() {
 	flag.StringVar(&groupBy, "group", "", "group questions (supported: type)")
 	flag.Parse()
 
-	db, err := openDB("flashcards.db") // sqlite
+	dataDir, err := getDataDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "failed to get data directory:", err)
+		os.Exit(1)
+	}
+
+	db, err := openDB(filepath.Join(dataDir, "flashcards.db"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to open db:", err)
 		os.Exit(1)
@@ -120,7 +142,7 @@ func runMigrations(db *sql.DB) error {
 		return err
 	}
 
-	entries, err := os.ReadDir("migrations")
+	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		return err
 	}
@@ -158,8 +180,7 @@ func runMigrations(db *sql.DB) error {
 		if applied[name] {
 			continue
 		}
-		path := filepath.Join("migrations", name)
-		body, err := os.ReadFile(path)
+		body, err := migrationsFS.ReadFile(filepath.Join("migrations", name))
 		if err != nil {
 			return err
 		}
