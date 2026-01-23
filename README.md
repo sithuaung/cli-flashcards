@@ -12,7 +12,7 @@ go build -o fcards
 ./fcards
 ```
 
-The app stores data in `flashcards.db` in the project directory.
+The app stores data in `flashcards.db` in the home directory `~/.fcards/flashcards.db`.
 
 ## Usage
 ```bash
@@ -28,6 +28,7 @@ To see the answer, press "enter". To quite, press "q"
 Flags:
 - `-type`: filter questions by type
 - `-group`: group questions (currently supports `type`)
+- once you're in group view, you can filter questions by typing `/`
 
 ## Database + migrations
 On startup the app runs SQL migrations found in `migrations/` and records
@@ -41,4 +42,4 @@ To add a migration:
 If the database is empty, a small sample set of questions is inserted
 automatically.
 
-## Import Q&A by yourself
+Feed whatever data you want to practice for flashcards.
