@@ -112,10 +112,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	rng.Shuffle(len(questions), func(i, j int) {
-		questions[i], questions[j] = questions[j], questions[i]
-	})
+	shuffleQuestions(questions)
 
 	if err := runUI(newCardsModel(questions)); err != nil {
 		fmt.Fprintln(os.Stderr, "ui error:", err)
@@ -348,6 +345,16 @@ func loadQuestions(db *sql.DB, typeFilter string) ([]Question, error) {
 	return questions, nil
 }
 
+func shuffleQuestions(questions []Question) {
+	if len(questions) < 2 {
+		return
+	}
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng.Shuffle(len(questions), func(i, j int) {
+		questions[i], questions[j] = questions[j], questions[i]
+	})
+}
+
 func loadTypeGroups(db *sql.DB) ([]TypeGroup, error) {
 	rows, err := db.Query(`
 		SELECT q.type, COUNT(1)
@@ -468,6 +475,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.err = err
 						return m, nil
 					}
+					shuffleQuestions(questions)
 					m.mode = modeCards
 					m.questions = questions
 					m.index = 0
