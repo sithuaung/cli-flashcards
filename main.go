@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"embed"
 	"flag"
@@ -12,6 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	tea "github.com/charmbracelet/bubbletea"
 	_ "modernc.org/sqlite"
 )
@@ -714,22 +719,44 @@ func formatAnswerLines(answer string, width int) []string {
 	out := []string{}
 	inCode := false
 	used := false
+	var codeLang string
+	var codeLines []string
 
 	for _, raw := range lines {
 		line := strings.TrimRight(raw, "\r")
-		if strings.HasPrefix(strings.TrimSpace(line), fence) {
-			inCode = !inCode
+		trimmed := strings.TrimSpace(line)
+
+		// Check for opening fence with optional language
+		if strings.HasPrefix(trimmed, fence) && !inCode {
+			inCode = true
+			codeLang = strings.TrimPrefix(trimmed, fence)
+			codeLang = strings.TrimSpace(codeLang)
+			codeLines = []string{}
+			continue
+		}
+
+		// Check for closing fence
+		if strings.HasPrefix(trimmed, fence) && inCode {
+			inCode = false
+			// Highlight the collected code block
+			code := strings.Join(codeLines, "\n")
+			code = expandTabs(code, 4)
+			highlighted := highlightCode(code, codeLang)
+			highlightedLines := strings.Split(strings.TrimSuffix(highlighted, "\n"), "\n")
+
+			for _, hl := range highlightedLines {
+				prefix := nextPrefix
+				if !used {
+					prefix = firstPrefix
+					used = true
+				}
+				out = append(out, prefix+hl)
+			}
 			continue
 		}
 
 		if inCode {
-			line = expandTabs(line, 4)
-			prefix := nextPrefix
-			if !used {
-				prefix = firstPrefix
-				used = true
-			}
-			out = append(out, prefix+line)
+			codeLines = append(codeLines, line)
 			continue
 		}
 
@@ -854,6 +881,39 @@ func max(a, b int) int {
 	return b
 }
 
+func highlightCode(code, lang string) string {
+	lexer := lexers.Get(lang)
+	if lexer == nil {
+		lexer = lexers.Analyse(code)
+	}
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	lexer = chroma.Coalesce(lexer)
+
+	style := styles.Get("monokai")
+	if style == nil {
+		style = styles.Fallback
+	}
+
+	formatter := formatters.Get("terminal256")
+	if formatter == nil {
+		formatter = formatters.Fallback
+	}
+
+	iterator, err := lexer.Tokenise(nil, code)
+	if err != nil {
+		return code
+	}
+
+	var buf bytes.Buffer
+	if err := formatter.Format(&buf, style, iterator); err != nil {
+		return code
+	}
+
+	return buf.String()
+}
+
 func expandTabs(s string, tabWidth int) string {
 	if tabWidth <= 0 || !strings.Contains(s, "\t") {
 		return s
@@ -877,9 +937,54 @@ func expandTabs(s string, tabWidth int) string {
 }
 
 func padRight(text string, width int) string {
-	runes := []rune(text)
-	if len(runes) >= width {
-		return string(runes[:width])
+	visWidth := visualWidth(text)
+	if visWidth >= width {
+		return truncateToVisualWidth(text, width)
 	}
-	return text + strings.Repeat(" ", width-len(runes))
+	return text + strings.Repeat(" ", width-visWidth)
+}
+
+func visualWidth(text string) int {
+	inEscape := false
+	width := 0
+	for _, r := range text {
+		if r == '\033' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if r == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		width++
+	}
+	return width
+}
+
+func truncateToVisualWidth(text string, maxWidth int) string {
+	inEscape := false
+	width := 0
+	var result strings.Builder
+	for _, r := range text {
+		if r == '\033' {
+			inEscape = true
+			result.WriteRune(r)
+			continue
+		}
+		if inEscape {
+			result.WriteRune(r)
+			if r == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		if width >= maxWidth {
+			break
+		}
+		result.WriteRune(r)
+		width++
+	}
+	return result.String()
 }
