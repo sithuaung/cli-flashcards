@@ -389,18 +389,19 @@ func runUI(m tea.Model) error {
 }
 
 type model struct {
-	mode        int
-	questions   []Question
-	index       int
-	showAnswers bool
-	width       int
-	height      int
-	groups      []TypeGroup
-	groupIndex  int
-	groupQuery  string
-	groupSearch bool
-	db          *sql.DB
-	err         error
+	mode         int
+	questions    []Question
+	index        int
+	showAnswers  bool
+	scrollOffset int
+	width        int
+	height       int
+	groups       []TypeGroup
+	groupIndex   int
+	groupQuery   string
+	groupSearch  bool
+	db           *sql.DB
+	err          error
 }
 
 func newCardsModel(questions []Question) model {
@@ -429,6 +430,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.mode == modeCards && m.index < len(m.questions) {
+			maxScroll := cardMaxScroll(m.questions[m.index], m.showAnswers, m.width, m.height)
+			m.scrollOffset = clampScroll(m.scrollOffset, maxScroll)
+		}
 	case tea.KeyMsg:
 		if m.mode == modeGroup && m.groupSearch {
 			if msg.String() == "ctrl+c" || msg.String() == "q" {
@@ -449,21 +454,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
-		case "/":
-			if m.mode == modeGroup {
-				m.groupSearch = true
-				m.groupQuery = ""
+		case "up", "k", "K":
+			if m.mode == modeCards && m.index < len(m.questions) {
+				if m.scrollOffset > 0 {
+					m.scrollOffset--
+				}
+			} else if m.mode == modeGroup && m.groupIndex > 0 {
+				m.groupIndex--
 			}
-		case "j", "J":
-			if m.mode == modeGroup {
+		case "down", "j", "J":
+			if m.mode == modeCards && m.index < len(m.questions) {
+				maxScroll := cardMaxScroll(m.questions[m.index], m.showAnswers, m.width, m.height)
+				if m.scrollOffset < maxScroll {
+					m.scrollOffset++
+				}
+			} else if m.mode == modeGroup {
 				filtered := filterGroups(m.groups, m.groupQuery)
 				if m.groupIndex < len(filtered)-1 {
 					m.groupIndex++
 				}
 			}
-		case "k", "K":
-			if m.mode == modeGroup && m.groupIndex > 0 {
-				m.groupIndex--
+		case "/":
+			if m.mode == modeGroup {
+				m.groupSearch = true
+				m.groupQuery = ""
 			}
 		case "enter":
 			if m.mode == modeGroup {
@@ -480,14 +494,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.questions = questions
 					m.index = 0
 					m.showAnswers = false
+					m.scrollOffset = 0
 				}
 			} else if m.index < len(m.questions) {
-				m.showAnswers = true
+				m.showAnswers = !m.showAnswers
+				m.scrollOffset = 0
 			}
-		case "h", "l":
+		case "l", "L":
 			if m.mode == modeCards && m.index < len(m.questions) {
 				m.index++
 				m.showAnswers = false
+				m.scrollOffset = 0
+			}
+		case "h", "H":
+			if m.mode == modeCards && m.index > 0 {
+				m.index--
+				m.showAnswers = false
+				m.scrollOffset = 0
 			}
 		}
 	}
@@ -505,32 +528,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.err != nil {
-		return fmt.Sprintf("Error: %v\nq to quit\n", m.err)
+		return padToHeight(fmt.Sprintf("Error: %v\nq to quit\n", m.err), m.height)
 	}
 	if m.mode == modeGroup {
-		return renderGroupList(m.groups, m.groupIndex, m.width, m.height, m.groupQuery, m.groupSearch) + "\n"
+		view := renderGroupList(m.groups, m.groupIndex, m.width, m.height, m.groupQuery, m.groupSearch) + "\n"
+		return padToHeight(view, m.height)
 	}
 	if m.index >= len(m.questions) {
-		return orange + "No more questions in this session." + reset + "\nq to quit\n"
+		return padToHeight(orange+"No more questions in this session."+reset+"\nq to quit\n", m.height)
 	}
 
-	width := 64
-	if m.width > 0 {
-		width = m.width / 2
-	}
-	if width < 34 {
-		width = 34
-	}
+	width := cardWidth(m.width)
 
 	q := m.questions[m.index]
-	return renderCard(q, m.showAnswers, m.index+1, len(m.questions), width) + "\n"
+	maxScroll := cardMaxScroll(q, m.showAnswers, m.width, m.height)
+	m.scrollOffset = clampScroll(m.scrollOffset, maxScroll)
+	view := renderCard(q, m.showAnswers, m.index+1, len(m.questions), width, m.height, m.scrollOffset) + "\n"
+	return padToHeight(view, m.height)
 }
 
-func renderCard(q Question, showAnswers bool, pos, total, width int) string {
+func renderCard(q Question, showAnswers bool, pos, total, width, height, scrollOffset int) string {
 	inner := width - 2
 
 	line := func(text string) string {
 		return orange + "|" + reset + " " + padRight(text, inner-2) + " " + orange + "|" + reset
+	}
+
+	contentLines := buildCardContentLines(q, showAnswers, inner-2)
+	visibleLines := visibleContentLines(len(contentLines), height)
+	maxScroll := max(0, len(contentLines)-visibleLines)
+	scrollOffset = clampScroll(scrollOffset, maxScroll)
+	start := scrollOffset
+	end := start + visibleLines
+	if end > len(contentLines) {
+		end = len(contentLines)
+	}
+
+	controls := "Enter: flip  •  H/L: next card"
+	if showAnswers {
+		controls = "H/L: next card  •  Enter: flip"
+	}
+	if len(contentLines) > visibleLines {
+		controls = "Up/Down: scroll  •  " + controls
 	}
 
 	builder := strings.Builder{}
@@ -541,28 +580,10 @@ func renderCard(q Question, showAnswers bool, pos, total, width int) string {
 	builder.WriteString("+" + strings.Repeat("-", inner) + "+\n")
 	builder.WriteString(reset)
 
-	builder.WriteString(line("QUESTION") + "\n")
-	for _, lineText := range wrapLines(q.Text, inner-2) {
+	for _, lineText := range contentLines[start:end] {
 		builder.WriteString(line(lineText) + "\n")
 	}
-	builder.WriteString(line("") + "\n")
-
-	if showAnswers {
-		builder.WriteString(line("ANSWERS") + "\n")
-		if len(q.Answers) == 0 {
-			builder.WriteString(line("(no answers stored)") + "\n")
-		} else {
-			for _, ans := range q.Answers {
-				for _, lineText := range formatAnswerLines(ans, inner-2) {
-					builder.WriteString(line(lineText) + "\n")
-				}
-			}
-		}
-		builder.WriteString(line("") + "\n")
-		builder.WriteString(line("H/L: next card  •  Enter: flip") + "\n")
-	} else {
-		builder.WriteString(line("Enter: flip  •  H/L: next card") + "\n")
-	}
+	builder.WriteString(line(controls) + "\n")
 
 	builder.WriteString(orange)
 	builder.WriteString("+" + strings.Repeat("-", inner) + "+")
@@ -739,6 +760,98 @@ func formatAnswerLines(answer string, width int) []string {
 	}
 
 	return out
+}
+
+func buildCardContentLines(q Question, showAnswers bool, width int) []string {
+	lines := []string{"QUESTION"}
+	lines = append(lines, wrapLines(q.Text, width)...)
+	lines = append(lines, "")
+
+	if showAnswers {
+		lines = append(lines, "ANSWERS")
+		if len(q.Answers) == 0 {
+			lines = append(lines, "(no answers stored)")
+		} else {
+			for _, ans := range q.Answers {
+				lines = append(lines, formatAnswerLines(ans, width)...)
+			}
+		}
+		lines = append(lines, "")
+	}
+
+	return lines
+}
+
+func visibleContentLines(total, height int) int {
+	if total == 0 {
+		return 0
+	}
+	if height <= 0 {
+		return total
+	}
+	visible := height - 5
+	if visible < 1 {
+		visible = 1
+	}
+	if visible > total {
+		visible = total
+	}
+	return visible
+}
+
+func cardWidth(termWidth int) int {
+	width := 64
+	if termWidth > 0 {
+		width = termWidth / 2
+	}
+	if width < 34 {
+		width = 34
+	}
+	return width
+}
+
+func cardMaxScroll(q Question, showAnswers bool, termWidth, termHeight int) int {
+	width := cardWidth(termWidth)
+	inner := width - 2
+	contentLines := buildCardContentLines(q, showAnswers, inner-2)
+	visible := visibleContentLines(len(contentLines), termHeight)
+	if visible == 0 || len(contentLines) <= visible {
+		return 0
+	}
+	return len(contentLines) - visible
+}
+
+func clampScroll(offset, max int) int {
+	if offset < 0 {
+		return 0
+	}
+	if offset > max {
+		return max
+	}
+	return offset
+}
+
+func padToHeight(view string, height int) string {
+	if height <= 0 || view == "" {
+		return view
+	}
+	viewLines := strings.Split(view, "\n")
+	if len(viewLines) >= height {
+		// Truncate to height and clear any extra content
+		return strings.Join(viewLines[:height], "\n")
+	}
+	// Pad with empty lines to fill the screen
+	for len(viewLines) < height {
+		viewLines = append(viewLines, strings.Repeat(" ", 80))
+	}
+	return strings.Join(viewLines, "\n")
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func expandTabs(s string, tabWidth int) string {
